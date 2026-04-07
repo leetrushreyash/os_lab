@@ -1,0 +1,15 @@
+*.exe
+*.txt
+
+# Compiled C binaries
+a.out
+generator
+manager
+mini
+practice
+problem
+shell
+s
+l
+grouping
+counting
