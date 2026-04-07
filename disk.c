@@ -172,6 +172,43 @@ void read_file(int inode_no){
     printf("\n") ;
 }
 
+#define FILENAME 28 //max length of filename 
+
+struct dir_entry{
+    int inode_no ; 
+    char filename[FILENAME] ;
+} ;
+
+#define ENTRIES_PER_BLOCK  MAX_SIZE/sizeof(struct dir_entry)
+
+
+// now we need to setup the root directory 
+
+int init_root_directory(){
+    //get a inode number for root 
+    int root_inode_no = allocate_inode() ;
+    // now we have to fill the space at that block where root_inode is present with appropriate data
+    struct inode* root_inode ;
+    // make this above node to point toward the memory space of root_inode_no ;
+    read_inode(root_inode_no , &root_inode) ;
+    // now its pointing to correct location lets us update entry now 
+    root_inode->blocks[0] = allocate_block() ; // some block b/w 12 to 1024 
+    root_inode->size = MAX_SIZE ;
+    root_inode->used = 1 ; 
+    // now write this value to correct block this info is stored somewhere in a block b/w 1 to 10 and at a particular offset 
+    write_inode(root_inode_no , &root_inode) ;
+    // now we know root directory manage 10 blocks and block 0 we will use to store filenames 
+    struct dir_entry entries[ENTRIES_PER_BLOCK] ;   // this much entry i can store in one block
+        for (int i = 0; i < ENTRIES_PER_BLOCK; i++) {
+        entries[i].inode_no = -1;
+        memset(entries[i].filename, 0, FILENAME);
+        // since no files are assigned so inode value will be -1 and name = 0 
+    }
+    write_block(root_inode->blocks[0] , entries ) ;
+    return root_inode_no ;
+}
+
+
 
 int main() {
 
