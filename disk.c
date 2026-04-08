@@ -266,6 +266,51 @@ int find_file_inode(int dir_inode_no , const char* filename){
         }
     }
     return -1 ;
+
+}
+
+void delete_file(int dir_inode_no, const char* filename) {
+    struct inode dir_node;
+    read_inode(dir_inode_no, &dir_node);
+    
+    // Check if the directory has allocated blocks
+    if (dir_node.blocks[0] == -1) {
+        printf("Error: Directory is empty.\n");
+        return;
+    }
+
+    struct dir_entry entries[ENTRIES_PER_BLOCK];
+    read_block(dir_node.blocks[0], entries);
+    
+    // Step 1: Search for the filename in the directory block
+    for (int i = 0; i < ENTRIES_PER_BLOCK; i++) {
+        if (entries[i].inode_no != -1 && strcmp(entries[i].filename, filename) == 0) {
+            
+            int target_inode_no = entries[i].inode_no;
+            
+            // Step 2: Remove the directory entry and save changes
+            entries[i].inode_no = -1;
+            memset(entries[i].filename, 0, FILENAME);
+            write_block(dir_node.blocks[0], entries);
+            
+            // Step 3: Free the actual file's data blocks
+            struct inode target_node;
+            read_inode(target_inode_no, &target_node);
+            for (int j = 0; j < MAX_BLOCK_PER_FILE; j++) {
+                if (target_node.blocks[j] != -1) {
+                    free_block(target_node.blocks[j]);
+                }
+            }
+            
+            // Step 4: Free the file's inode
+            free_inode(target_inode_no);
+            
+            printf("File '%s' deleted successfully.\n", filename);
+            return;
+        }
+    }
+    
+    printf("Error: File '%s' not found.\n", filename);
 }
 
 int main() {
