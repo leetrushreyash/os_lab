@@ -2,351 +2,180 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <time.h>
-#include <stdbool.h>
+#include <unistd.h>
 
-#define MAXPROCESSES 10     // total number of process 10
-#define MAXRESOURCETYPES 4    // four types of resource r0 , r1 , r2 , r3
-#define MAXREQUESTS 10       // maximum number of request a process can do 
+#define MAXP 10
+#define MAXR 4
+#define MAXREQ 10
 
-int TotalResources[MAXRESOURCETYPES] = {20, 20, 20, 20};   // initial resources 
-int Max[MAXPROCESSES][MAXRESOURCETYPES];
-int Allocation[MAXPROCESSES][MAXRESOURCETYPES];
-int Need[MAXPROCESSES][MAXRESOURCETYPES];
-int Request[MAXPROCESSES][MAXRESOURCETYPES];
-int Available[MAXRESOURCETYPES];
-int finish_arr[MAXPROCESSES];   
-int completed[MAXPROCESSES];    // visited 
-int activeProcesses;
+// System Arrays
+int TotalRes[MAXR] = {20, 20, 20, 20};
+int Max[MAXP][MAXR], Alloc[MAXP][MAXR], Need[MAXP][MAXR];
+int Req[MAXP][MAXR], Avail[MAXR];
 
-pthread_cond_t resourceWait[MAXPROCESSES];   // if process i request me make the thread sleep using this 
-pthread_cond_t handlerWait;  // central allocator wait
-int requestProcessesQueue[MAXPROCESSES+1]; // process will go to this queue after requesting store pid
-int tail;  // a pointer 
-pthread_mutex_t requestLock;   // for mut-ex in shared resources 
+// State flags
+int pending[MAXP], completed[MAXP];
+int activeProcs = MAXP;
 
-void displayState(void) { 
-    int i, j, pno; 
-    
-    printf("Proc\t       MAX              Allocation              Need\n\t"); 
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf("  R%d", j+1); 
-    printf("    "); 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf("  R%d", j+1); 
-    printf("    "); 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf("  R%d", j+1); 
-    printf("\n"); 
-    
-    for (i=0; i<MAXPROCESSES; i++) { 
-        printf("P%d\t", i+1); 
-        
-        for (j=0; j<MAXRESOURCETYPES; j++) 
-            printf("%4d", Max[i][j]); 
-        printf("    "); 
-        
-        for (j=0; j<MAXRESOURCETYPES; j++) 
-            printf("%4d", Allocation[i][j]); 
-        printf("    "); 
-        
-        for (j=0; j<MAXRESOURCETYPES; j++) 
-            printf("%4d", Need[i][j]); 
-        printf("\n"); 
-    } 
-    
-    printf("\nAvailable: "); 
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf("%4d", Available[j]); 
-    
-    printf("\nRequests waiting : %d\n", tail); 
-    for (i=0; i<tail; i++) { 
-        pno = requestProcessesQueue[i]; 
-        printf("Process #%d : ", pno+1); 
-        for (j=0; j<MAXRESOURCETYPES; j++) 
-            printf(" %d", Request[pno][j]); 
-        printf("\n"); 
-    } 
-    printf("Completed :"); 
-    for (i=0; i<MAXPROCESSES; i++) 
-        if (completed[i] == 1) 
-            printf(" %d", i+1); 
-    printf("\n\n"); 
-}
+// Thread Synchronization
+pthread_cond_t resWait[MAXP], handlerWait;
+pthread_mutex_t lock;
 
-void requestResources(int pno) { 
-    int j; 
-    for (j=0; j<MAXRESOURCETYPES; j++)  
-        if ((Max[pno][j] - Allocation[pno][j]) > 0) 
-            Request[pno][j] = rand() % (Max[pno][j] - Allocation[pno][j] + 1); 
-        else Request[pno][j] = 0; 
-    
-    printf("Request by P#%d : ", pno + 1); 
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf("%d ", Request[pno][j]); 
-    printf("\n"); 
-    
-    requestProcessesQueue[tail++] = pno; 
-    pthread_cond_signal(&handlerWait); 
-    pthread_cond_wait(&resourceWait[pno], &requestLock); 
-}
+// Banker's Algorithm Safety Check
+int isSafe() {
+    int work[MAXR], finish[MAXP];
+    for (int i = 0; i < MAXR; i++) work[i] = Avail[i];
+    for (int i = 0; i < MAXP; i++) finish[i] = completed[i];
 
-void releaseAllResources(int pno) { 
-    int j; 
-    printf("Process #%d releasing all resources\n", pno + 1); 
-    for (j=0; j<MAXRESOURCETYPES; j++) { 
-        Available[j] += Allocation[pno][j]; 
-        Allocation[pno][j] = 0; 
-        Max[pno][j] = 0; 
-        Need[pno][j] = 0; 
-    } 
-    pthread_cond_signal(&handlerWait); 
-}
-
-void releaseSomeResources(int pno) { 
-    int j, r; 
-    printf("Process #%d releasing some resources\n", pno + 1); 
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        if (Allocation[pno][j] != 0) { 
-            r = (rand() % (Allocation[pno][j]+1)); 
-            Allocation[pno][j] -= r; 
-            Available[j] += r; 
-        } 
-    pthread_cond_signal(&handlerWait);
-}
-
-int isSafe(void) { 
-    int i, j; 
-    int work[MAXRESOURCETYPES]; 
-    int finish[MAXPROCESSES] = {0}; 
-    int safeseq[MAXPROCESSES] = {0}; 
-    int count = 0; 
-    int flag; 
-    
-    printf("Safety algorithm\n"); 
-    displayState(); 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++)  
-        work[j] = Available[j]; 
-    
-    for (i=0; i<MAXPROCESSES; i++)  
-        for (j=0; j<MAXRESOURCETYPES; j++)  
-            Need[i][j] = Max[i][j] - Allocation[i][j]; 
-    
-    for (i=0; i<MAXPROCESSES; i++) { 
-        flag = 1; 
-        for (j=0; j<MAXRESOURCETYPES; j++)  
-            if (Max[i][j] != 0) { 
-                flag = 0; 
-                break; 
-            } 
-        if (flag == 1) { 
-            safeseq[count++] = i; 
-            finish[i] = 1; 
-        } 
-    } 
-    
-    while (1) { 
-        for (i=0; i<MAXPROCESSES; i++) { 
-            if (finish[i] == 1) continue; 
-            for (j=0; j<MAXRESOURCETYPES; j++) 
-                if (Need[i][j] > work[j]) break; 
-            
-            if (j >= MAXRESOURCETYPES) break; 
-        } 
-        
-        if (i < MAXPROCESSES) { 
-            finish[i] = 1; 
-            safeseq[count++] = i; 
-            for (j=0; j<MAXRESOURCETYPES; j++)  
-                work[j] += Allocation[i][j]; 
-        } 
-        else { 
-            if (count == MAXPROCESSES) { 
-                printf("Safe sequence : "); 
-                for (i=0; i<count; i++) 
-                    if (completed[i] == 0) 
-                        printf(" %d", safeseq[i]+1); 
-                printf("\n"); 
-                return 1; 
-            } 
-            else return 0;  
-        } 
-    } 
-}
-
-int processRequest(int pno) { 
-    int j; 
-    
-    printf("process Request #%d\n", pno + 1); 
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf(" %d", Request[pno][j]); 
-    printf("\n"); 
-    
-    printf("\nAvailable: "); 
-    for (j=0; j<MAXRESOURCETYPES; j++) 
-        printf("%4d", Available[j]); 
-    printf("\n"); 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++) { 
-        if ((Allocation[pno][j] + Request[pno][j]) > Max[pno][j]) break; 
-    } 
-    
-    if (j < MAXRESOURCETYPES) { 
-        printf("Error: invalid request by process : %d\n", pno + 1); 
-        return 0; 
-    } 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++) { 
-        if (Request[pno][j] > Available[j]) 
-            break; 
-    } 
-    
-    if (j < MAXRESOURCETYPES) { 
-        printf("Sufficient resources are not available for process : %d\n", pno + 1); 
-        return 0; 
-    } 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++) { 
-        Available[j] -= Request[pno][j]; 
-        Allocation[pno][j] += Request[pno][j]; 
-    } 
-    
-    if (isSafe()) { 
-        printf("Request of process %d is granted\n", pno + 1); 
-        for (j=0; j<MAXRESOURCETYPES; j++)  
-            Request[pno][j] = 0; 
-        pthread_cond_signal(&resourceWait[pno]); 
-        return 1; 
-    } 
-    else { 
-        printf("Request of process %d is not granted, UNSAFE\n", pno + 1); 
-        for (j=0; j<MAXRESOURCETYPES; j++) { 
-            Available[j] += Request[pno][j]; 
-            Allocation[pno][j] -= Request[pno][j];  
-        } 
-        return 0; 
-    } 
-}
-
-void *deadlockHandler(void *arg) { 
-    int i, j, pno, ret; 
-    
-    while (activeProcesses > 0) { 
-        pthread_mutex_lock(&requestLock); 
-        
-        if (tail > 0) { 
-            for (i=0; i<tail; i++) { 
-                pno = requestProcessesQueue[i]; 
-                ret = processRequest(pno); 
+    while (1) {
+        int found = 0;
+        for (int i = 0; i < MAXP; i++) {
+            if (!finish[i]) {
+                int j;
+                for (j = 0; j < MAXR; j++) 
+                    if (Need[i][j] > work[j]) break;
                 
-                if (ret == 1) { 
-                    for (j=i; j<tail-1; j++)  
-                        requestProcessesQueue[j] = requestProcessesQueue[j+1]; 
-                    tail--; 
-                    i--; 
-                } 
-            } 
-        } 
+                if (j == MAXR) { // If all needs can be met
+                    for (j = 0; j < MAXR; j++) work[j] += Alloc[i][j];
+                    finish[i] = 1;
+                    found = 1;
+                }
+            }
+        }
+        if (!found) break; // Stop if we can't find any safe processes
+    }
+    
+    for (int i = 0; i < MAXP; i++) 
+        if (!finish[i]) return 0; // Unsafe!
+    return 1; // Safe!
+}
+
+// OS tries to grant resources
+int tryGrant(int p) {
+    // 1. Can we even afford it right now?
+    for (int j = 0; j < MAXR; j++) if (Req[p][j] > Avail[j]) return 0;
+
+    // 2. Pretend to allocate
+    for (int j = 0; j < MAXR; j++) {
+        Avail[j] -= Req[p][j];
+        Alloc[p][j] += Req[p][j];
+        Need[p][j] -= Req[p][j];
+    }
+    
+    // 3. Check Safety
+    if (isSafe()) {
+        for (int j = 0; j < MAXR; j++) Req[p][j] = 0;
+        pthread_cond_signal(&resWait[p]); // Wake up the process
+        return 1; 
+    } else { 
+        // 4. Rollback if unsafe
+        for (int j = 0; j < MAXR; j++) {
+            Avail[j] += Req[p][j];
+            Alloc[p][j] -= Req[p][j];
+            Need[p][j] += Req[p][j];
+        }
+        return 0;
+    }
+}
+
+// OS Central Allocator Thread
+void *handler(void *arg) {
+    while (activeProcs > 0) {
+        pthread_mutex_lock(&lock);
         
-        pthread_cond_wait(&handlerWait, &requestLock); 
-        pthread_mutex_unlock(&requestLock); 
-    } 
+        // Loop over processes. If they are pending, try to grant.
+        for (int i = 0; i < MAXP; i++) {
+            if (pending[i]) {
+                if (tryGrant(i)) pending[i] = 0; // Un-mark pending if granted
+            }
+        }
+        
+        pthread_cond_wait(&handlerWait, &lock); // Sleep until a process wakes me
+        pthread_mutex_unlock(&lock);
+    }
     return NULL;
 }
 
-void *requestGenerator(void *arg) { 
-    int myno = *(int *)arg; 
-    int i, j; 
-    struct timespec t, rem; 
-    
-    for (i=0; i<MAXREQUESTS; i++) { 
-        printf("Process #%d iteration %d\n", myno+1, (i+1)); 
-        pthread_mutex_lock(&requestLock); 
-        requestResources(myno); 
-        pthread_mutex_unlock(&requestLock); 
+// User Process Thread
+void *process(void *arg) {
+    int p = *(int *)arg;
+
+    for (int iter = 0; iter < MAXREQ; iter++) {
+        pthread_mutex_lock(&lock);
+        // Ask for random amount within our Needs
+        for (int j = 0; j < MAXR; j++) 
+            if (Need[p][j] > 0) Req[p][j] = rand() % (Need[p][j] + 1);
         
-        t.tv_sec = (rand() % 2) + 1; 
-        t.tv_nsec = 0; 
-        nanosleep(&t, &rem); 
+        pending[p] = 1;
+        pthread_cond_signal(&handlerWait); // Wake up OS
+        pthread_cond_wait(&resWait[p], &lock); // Wait for approval
+        pthread_mutex_unlock(&lock);
+
+        sleep((rand() % 2) + 1); // Work
+
+        // Randomly release some resources
+        pthread_mutex_lock(&lock);
+        if (rand() % 2 == 0) {
+            for (int j = 0; j < MAXR; j++) {
+                int r = rand() % (Alloc[p][j] + 1);
+                Alloc[p][j] -= r;
+                Avail[j] += r;
+                Need[p][j] += r; // We gave it back, so we might need it later
+            }
+            pthread_cond_signal(&handlerWait); // Tell OS we released stuff
+        }
+        pthread_mutex_unlock(&lock);
         
-        if ((rand() % 10) < 5) { 
-            pthread_mutex_lock(&requestLock); 
-            releaseSomeResources(myno); 
-            pthread_mutex_unlock(&requestLock); 
-        } 
-        
-        t.tv_sec = (rand() % 2) + 1; 
-        t.tv_nsec = 0; 
-        nanosleep(&t, &rem); 
-    } 
-    
-    pthread_mutex_lock(&requestLock); 
-    printf("Process %d has completed its execution\n", myno+1); 
-    releaseAllResources(myno); 
-    for (j=0; j<MAXRESOURCETYPES; j++) { 
-        Max[myno][j] = 0; 
-        Allocation[myno][j] = 0; 
-    } 
-    activeProcesses--; 
-    completed[myno] = 1; 
-    pthread_mutex_unlock(&requestLock); 
-    
-    pthread_cond_signal(&handlerWait);
-    
-    return NULL; 
+        sleep((rand() % 2) + 1); // Work
+    }
+
+    // Finish entirely
+    pthread_mutex_lock(&lock);
+    for (int j = 0; j < MAXR; j++) {
+        Avail[j] += Alloc[p][j]; // Give everything back
+        Alloc[p][j] = 0;
+    }
+    completed[p] = 1;
+    activeProcs--;
+    printf("Process %d Finished successfully\n", p);
+    pthread_cond_signal(&handlerWait); // Tell OS to check waiting threads or shut down
+    pthread_mutex_unlock(&lock);
+    return NULL;
 }
 
-void initialize() { 
-    int i, j; 
-    for (i=0; i<MAXPROCESSES; i++)  pthread_cond_init(&resourceWait[i], NULL);   // intialize all the condition variable
-        
-    pthread_cond_init(&handlerWait, NULL); // initialize condition for handler
-    pthread_mutex_init(&requestLock, NULL);  // initialize mutex for shared resource 
-    
-    srand(time(NULL)); 
-    
-    for (i=0; i<MAXPROCESSES; i++)  { 
-        for (j=0; j<MAXRESOURCETYPES; j++) { 
-            Max[i][j] = rand() % (TotalResources[j] / 2 + 1); // assign max requirement
-            Allocation[i][j] = 0;  // initialize allocation
-            Request[i][j] = 0;  // initialize request 
-        } 
-        completed[i] = 0;  // mark all process not completed 
-    } 
-    
-    for (j=0; j<MAXRESOURCETYPES; j++)  
-        Available[j] = TotalResources[j];    // currently available resoruces 
-    
-    tail = 0; // tail of the queue
-    activeProcesses = MAXPROCESSES;  // total active process
-}
+int main() {
+    pthread_t t_handler, t_proc[MAXP];
+    int pids[MAXP];
+    srand(time(NULL));
 
-int main() { 
-    int i; 
-    pthread_t ptids[MAXPROCESSES];    // 10 threads for process 
-    pthread_t htid;    // one central process for handling 
-    int tnos[MAXPROCESSES] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}; // id for each process
-    int htno = 0;  // handler 
+    // Initialize locks
+    pthread_mutex_init(&lock, NULL);
+    pthread_cond_init(&handlerWait, NULL);
     
-    initialize(); 
+    // Setup arrays
+    for (int j = 0; j < MAXR; j++) Avail[j] = TotalRes[j];
+
+    for (int i = 0; i < MAXP; i++) {
+        pthread_cond_init(&resWait[i], NULL);
+        pids[i] = i;
+        for (int j = 0; j < MAXR; j++) { // Give random initial Max Needs
+            Max[i][j] = Need[i][j] = rand() % (TotalRes[j] / 2 + 1);
+        }
+    }
+
+    // Start Threads
+    pthread_create(&t_handler, NULL, handler, NULL);
+    for (int i = 0; i < MAXP; i++) pthread_create(&t_proc[i], NULL, process, &pids[i]);
+
+    // Wait for all processes to finish
+    for (int i = 0; i < MAXP; i++) pthread_join(t_proc[i], NULL);
     
-    pthread_create(&htid, NULL, deadlockHandler, &htno); // create central thread it is going to execute deadlock handling
-    
-    for (i=0; i<MAXPROCESSES; i++)  
-        pthread_create(&ptids[i], NULL, requestGenerator, &tnos[i]);  // make thread associate id and 
-    
-    printf("All threads created\n"); 
-    
-    for (i=0; i<MAXPROCESSES; i++)  
-        pthread_join(ptids[i], NULL); 
-    
-    pthread_mutex_lock(&requestLock);
-    pthread_cond_signal(&handlerWait); // wakeup the central thread 
-    pthread_mutex_unlock(&requestLock);
-    pthread_join(htid, NULL); 
-    
-    displayState(); 
-    return 0; 
+    // Shut down the handler
+    pthread_mutex_lock(&lock);
+    pthread_cond_signal(&handlerWait); 
+    pthread_mutex_unlock(&lock);
+    pthread_join(t_handler, NULL);
+
+    printf("\nAll processes completed without deadlock!\n");
+    return 0;
 }
